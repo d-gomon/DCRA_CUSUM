@@ -1,0 +1,83 @@
+---
+title: "Anonimize DICA charts"
+author: "Daniel Gomon"
+date: '2023-04-05'
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Data loaded below is not publicly available.
+Anonimized data is saved at the end of this file.
+
+```{r}
+load("DICA_charts.Rdata")
+load("control_surv_DICA.Rdata")
+load("control_stay_DICA.Rdata")
+load("funnel_plots_DICA.Rdata")
+```
+
+
+# We anonimize the data
+
+Assign random unit numbers to hospitals
+
+```{r}
+#Removed this code block to retain anonimity
+```
+
+Assign these to existing files
+
+```{r}
+funnel_surv$data$unit <- as.character(unitcoding[match(funnel_surv$data$unit, unitcoding[, 1]), 2])
+funnel_stay$data$unit <- as.character(unitcoding[match(funnel_stay$data$unit, unitcoding[, 3]), 4])
+
+rownames(h_surv) <- unitcoding[, 2]
+rownames(h_stay) <- unitcoding[, 4]
+```
+
+Overwrite estimated psi values
+
+```{r}
+names(psi_surv) <- unitcoding[, 2]
+names(psi_stay) <- unitcoding[, 4]
+names(charts_surv) <- unitcoding[, 2]
+names(charts_stay) <- unitcoding[, 4]
+```
+
+Sort in existing data to ensure anonymity
+
+```{r}
+psi_surv <- psi_surv[order(as.numeric(names(psi_surv)))]
+psi_stay <- psi_stay[order(as.numeric(names(psi_stay)))]
+funnel_surv$data <- funnel_surv$data[order(as.numeric(funnel_surv$data$unit)),]
+funnel_stay$data <- funnel_stay$data[order(as.numeric(funnel_stay$data$unit)),]
+charts_surv <- charts_surv[order(as.numeric(names(charts_surv)))]
+charts_stay <- charts_stay[order(as.numeric(names(charts_stay)))]
+h_surv <- h_surv[order(as.numeric(rownames(h_surv))),]
+h_stay <- h_stay[order(as.numeric(rownames(h_stay))),]
+```
+
+
+Remove unnecessary data.
+```{r}
+rm(glmmodstay)
+rm(glmmodsurv)
+rm(coxmodstay)
+rm(coxmodsurv)
+rm(psivals)
+rm(unit_nums)
+rm(unitcoding)
+```
+
+
+Save anonymized data:
+```{r}
+save.image(file = "DCRA_anon.Rdata")
+```
+
+
+
+

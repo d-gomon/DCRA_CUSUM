@@ -1,0 +1,147 @@
+---
+title: "6_AdditionalFile1"
+author: "Gomon, Daniel"
+date: "06/04/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r echo = FALSE}
+load("DCRA_anon.Rdata")
+library(formattable)
+library(success)
+library(mgcv)
+```
+
+```{r echo = FALSE}
+mspline<-function(x,y,k=4,lower=NA,upper=NA){
+  #fits a monotonic spline to data
+  #small values of k= more smoothing (flatter curves)
+  #large values of k= more flexible (wiggly curves)
+  #k is related to effective degrees of freedom and number of knots
+  #use unconstrained gam to get rough parameter estimates
+  #lower, upper optional bounds on the function
+  #basically a slight modification of an example in the mgcv::pcls documentation
+  dat<-data.frame(x=x,y=y)
+  init_gam <- gam(y~s(x,k=k,bs="cr"))
+  # Create Design matrix, constraints etc. for monotonic spline....
+  sm <- smoothCon(s(x,k=k,bs="cr"),dat,knots=NULL)[[1]]
+  mc <- mono.con(sm$xp,lower=lower,upper=upper) # monotonicity constraints
+  M <- list(X=sm$X, y=y, #design matrix, outcome
+            C=matrix(0,0,0), #equality constraints (none)
+            Ain=mc$A, bin=mc$b, #inequality constraints
+            sp=init_gam$sp, p=sm$xp, #initial guesses for param estimates
+            S=sm$S, #smoothness penalty matrix
+            w=y*0+1, off=0 #weights, offset
+            )
+  #fit spine using penalized constrained least squares
+  p<-pcls(M)
+  return(list(sm=sm,p=p))
+}
+
+predict.mspline<-function(msp,x){
+  #using the monotone spline msp, predict values for the vector x
+  Predict.matrix(msp$sm,data.frame(x=x))%*%msp$p
+}
+```
+
+```{r echo = FALSE}
+bersmooth_surv <- mspline(psi_surv, h_surv[,1])
+bksmooth_surv <- mspline(psi_surv, h_surv[,2])
+cgrsmooth_surv <- mspline(psi_surv, h_surv[,3])
+bersmooth_stay <- mspline(psi_stay, -h_stay[,1])
+bksmooth_stay <- mspline(psi_stay, -h_stay[,2])
+cgrsmooth_stay <- mspline(psi_stay, -h_stay[,3])
+```
+
+```{r echo = FALSE}
+h_surv_smoothed <- t(sapply(psi_surv, function(x) c(predict.mspline(bersmooth_surv, x), predict.mspline(bksmooth_surv, x), predict.mspline(cgrsmooth_surv, x))))
+colnames(h_surv_smoothed) <- c("Ber", "BK", "CGR")
+
+h_stay_smoothed <- -t(sapply(psi_stay, function(x) c(predict.mspline(bersmooth_stay, x), predict.mspline(bksmooth_stay, x), predict.mspline(cgrsmooth_stay, x))))
+colnames(h_stay_smoothed) <- c("Ber", "BK", "CGR")
+```
+
+
+
+```{r}
+hosp_names <- as.numeric(names(psi_surv))
+
+surv_det_times <- matrix(Inf, nrow = length(hosp_names), ncol = 5)
+for(i in 1:length(hosp_names)){
+  surv_det_times[i, 2] <- runlength(charts_surv[[i]]$ber, h = h_surv_smoothed[i, 1])
+  surv_det_times[i, 3] <- runlength(charts_surv[[i]]$bk, h = h_surv_smoothed[i, 2])
+  surv_det_times[i, 4] <- runlength(charts_surv[[i]]$cgr, h = h_surv_smoothed[i, 3])
+}
+
+#which hospitals did funnel plot detect
+funnel_det_surv <- as.numeric(funnel_surv$data$unit[which(funnel_surv$data$`0.95` == "worse")])
+#Funnel always detects at end of study
+surv_det_times[match(funnel_det_surv, as.numeric(names(psi_surv))), 1] <- 1095
+#Which rows were detected?
+detected_rows_surv <- which(!apply(1-surv_det_times, 1, function(x) all(is.infinite(x))))
+#Add estimated arrival rate
+surv_det_times[,5] <- round(psi_surv, 2)
+#Add row and column names
+surv_det_times2 <- cbind(1:71, surv_det_times, round(h_surv_smoothed, 2))
+colnames(surv_det_times2) <- c("Hospital number" ,"funnel plot signal (days)", "Binary CUSUM signal (days)", "BK-CUSUM signal (days)", "CGR-CUSUM signal (days)", "Estimated Arrival rate (per day)", "binary CUSUM control limit", "BK-CUSUM control limit", "CGR-CUSUM control limit")
+surv_det_times2 <- surv_det_times2[, c(1, 6, 2, 3, 4, 5, 7, 8, 9)]
+
+format_surv2 <- as.data.frame(surv_det_times2)
+formattable(format_surv2, 
+    align = c("l", "l", "c", "c", "c", "c", "c", "c", "c"),
+    list(
+    "Binary CUSUM signal (days)" = formatter("span", style = x ~ formattable::style(color = ifelse(!is.infinite(x), "green", "red"))),
+    "BK-CUSUM signal (days)" = formatter("span", style = x ~ formattable::style(color = ifelse(!is.infinite(x), "green", "red"))),
+    "CGR-CUSUM signal (days)" = formatter("span", style = x ~ formattable::style(color = ifelse(!is.infinite(x), "green", "red"))),
+    "funnel plot signal (days)" = formatter("span", style = x ~ formattable::style(color = ifelse(!is.infinite(x), "green", "red"))),
+    area(col = c('Estimated Arrival rate (per day)')) ~ normalize_bar("pink", 0.2),
+    "binary CUSUM control limit" = color_tile("lightgreen", "seagreen"),
+    "BK-CUSUM control limit" = color_tile("white", "grey50"),
+    "CGR-CUSUM control limit" = color_tile("lightblue", "steelblue")
+    ))
+```
+
+
+
+```{r}
+hosp_names <- as.numeric(names(psi_stay))
+
+stay_det_times <- matrix(Inf, nrow = length(hosp_names), ncol = 5)
+for(i in 1:length(hosp_names)){
+  stay_det_times[i, 2] <- runlength(charts_stay[[i]]$ber, h = h_stay_smoothed[i, 1])
+  stay_det_times[i, 3] <- runlength(charts_stay[[i]]$bk, h = h_stay_smoothed[i, 2])
+  stay_det_times[i, 4] <- runlength(charts_stay[[i]]$cgr, h = h_stay_smoothed[i, 3])
+}
+
+#which hospitals did funnel plot detect
+funnel_det_stay <- as.numeric(funnel_stay$data$unit[which(funnel_stay$data$`0.95` == "worse")])
+#Funnel always detects at end of study
+stay_det_times[match(funnel_det_stay, as.numeric(names(psi_stay))), 1] <- 1095
+#Which rows were detected?
+detected_rows_stay <- which(!apply(1-stay_det_times, 1, function(x) all(is.infinite(x))))
+#Add estimated arrival rate
+stay_det_times[,5] <- round(psi_stay, 2)
+#Add row and column names
+stay_det_times2 <- cbind(1:71, stay_det_times, round(h_stay_smoothed, 2))
+colnames(stay_det_times2) <- c("Hospital number" ,"funnel plot signal (days)", "Binary CUSUM signal (days)", "BK-CUSUM signal (days)", "CGR-CUSUM signal (days)", "Estimated Arrival rate (per day)", "binary CUSUM control limit", "BK-CUSUM control limit", "CGR-CUSUM control limit")
+stay_det_times2 <- stay_det_times2[, c(1, 6, 2, 3, 4, 5, 7, 8, 9)]
+
+format_stay2 <- as.data.frame(stay_det_times2)
+formattable(format_stay2, 
+    align = c("l", "l", "c", "c", "c", "c", "c", "c", "c"),
+    list(
+    "Binary CUSUM signal (days)" = formatter("span", style = x ~ formattable::style(color = ifelse(!is.infinite(x), "green", "red"))),
+    "BK-CUSUM signal (days)" = formatter("span", style = x ~ formattable::style(color = ifelse(!is.infinite(x), "green", "red"))),
+    "CGR-CUSUM signal (days)" = formatter("span", style = x ~ formattable::style(color = ifelse(!is.infinite(x), "green", "red"))),
+    "funnel plot signal (days)" = formatter("span", style = x ~ formattable::style(color = ifelse(!is.infinite(x), "green", "red"))),
+    area(col = c('Estimated Arrival rate (per day)')) ~ normalize_bar("pink", 0.2),
+    "binary CUSUM control limit" = color_tile("lightgreen", "seagreen"),
+    "BK-CUSUM control limit" = color_tile("white", "grey50"),
+    "CGR-CUSUM control limit" = color_tile("lightblue", "steelblue")
+    ))
+```

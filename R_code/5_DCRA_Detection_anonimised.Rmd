@@ -1,0 +1,642 @@
+---
+title: "DICA DCRA Detection"
+author: "Daniel Gomon"
+date: '2022-12-20'
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(success)
+library(ggplot2)
+theme_set(theme_bw())
+```
+
+```{r}
+load("DCRA_anon.Rdata")
+```
+
+
+# Goal of this file
+
+In this file we compare detection speeds of Funnel plot, Bernoulli CUSUM, BK-CUSUM and CGR-CUSUM on DICA: DCRA data from 01-01-2019 en 31-12-2021.
+
+
+# Display the funnel plot
+
+```{r}
+library(ggpubr)
+
+funnelplot_surv <- plot(funnel_surv, unit_label = TRUE) + theme_bw() + labs(subtitle = "Outcome: deceased 90 days post surgery?") + xlab("Number of surgeries") + ylab("(Risk-adjusted) Proportion of deaths (%)") + theme(plot.title = element_text(hjust = 0.5, size = 14, face = "bold"), plot.subtitle = element_text(hjust = 0.5, size = 12, color = "grey50")) 
+
+funnelplot_stay <- plot(funnel_stay, unit_label = TRUE) + theme_bw() + labs(subtitle = "Outcome: discharged 21 days post surgery?") + xlab("Number of surgeries") + ylab("(Risk-adjusted) Proportion of discharges (%)") + theme(plot.title = element_text(hjust = 0.5, size = 14, face = "bold"), plot.subtitle = element_text(hjust = 0.5, size = 12, color = "grey50"))
+
+funnels <- ggarrange(funnelplot_surv, funnelplot_stay, ncol = 2, labels = c("A", "B"), common.legend = TRUE, legend = "bottom")
+
+funnels_title <- annotate_figure(funnels, top = text_grob("Funnel plots of DCRA data (01/01/19 - 31/12/21)", 
+               color = "black", face = "bold", size = 14))
+
+#ggsave("FunnelPlots.pdf", plot = funnels_title, width = 1200, height = 500, units = "mm", dpi = 300, scale = 0.25)
+
+```
+
+
+
+
+
+
+# Determine control limits to use (survival and duration of stay)
+
+We want to determine control limits to use. We fit monotone increasing functions using cubic regression splines.
+
+METHOD = CUBIC REGRESSION SPLINES (Section 5.3.1 of Wood (2017))
+
+Functions based on mgcv() to fit a smooth monotonic function through x and y:
+
+```{r}
+library(mgcv)
+mspline<-function(x,y,k=4,lower=NA,upper=NA){
+  #fits a monotonic spline to data
+  #small values of k= more smoothing (flatter curves)
+  #large values of k= more flexible (wiggly curves)
+  #k is related to effective degrees of freedom and number of knots
+  #use unconstrained gam to get rough parameter estimates
+  #lower, upper optional bounds on the function
+  #basically a slight modification of an example in the mgcv::pcls documentation
+  dat<-data.frame(x=x,y=y)
+  init_gam <- gam(y~s(x,k=k,bs="cr"))
+  # Create Design matrix, constraints etc. for monotonic spline....
+  sm <- smoothCon(s(x,k=k,bs="cr"),dat,knots=NULL)[[1]]
+  mc <- mono.con(sm$xp,lower=lower,upper=upper) # monotonicity constraints
+  M <- list(X=sm$X, y=y, #design matrix, outcome
+            C=matrix(0,0,0), #equality constraints (none)
+            Ain=mc$A, bin=mc$b, #inequality constraints
+            sp=init_gam$sp, p=sm$xp, #initial guesses for param estimates
+            S=sm$S, #smoothness penalty matrix
+            w=y*0+1, off=0 #weights, offset
+            )
+  #fit spine using penalized constrained least squares
+  p<-pcls(M)
+  return(list(sm=sm,p=p))
+}
+
+predict.mspline<-function(msp,x){
+  #using the monotone spline msp, predict values for the vector x
+  Predict.matrix(msp$sm,data.frame(x=x))%*%msp$p
+}
+```
+
+## Survival
+
+Fit smoother through estimated control limits using above functions with the smallest amount of knots $k = 4$ so the line is not wiggly.
+
+```{r}
+bersmooth_surv <- mspline(psi_surv, h_surv[,1])
+bksmooth_surv <- mspline(psi_surv, h_surv[,2])
+cgrsmooth_surv <- mspline(psi_surv, h_surv[,3])
+```
+
+## Duration of stay
+
+Fit smoother again, but we have monotone increasing function, so consider - control limit
+
+```{r}
+bersmooth_stay <- mspline(psi_stay, -h_stay[,1])
+bksmooth_stay <- mspline(psi_stay, -h_stay[,2])
+cgrsmooth_stay <- mspline(psi_stay, -h_stay[,3])
+```
+
+## Create a plot displaying the result.
+
+Initiate data
+```{r}
+hdf_discrete <- data.frame(psi = c(rep(psi_surv, 3), rep(psi_stay, 3)), 
+                           value = c(h_surv[, 1], h_surv[, 2], h_surv[, 3], h_stay[, 1], h_stay[, 2], h_stay[, 3]),
+                           type = c(rep(c(rep("Binary", N_hosp), rep("BK", N_hosp), rep("CGR", N_hosp)), 2)),
+                           outcome = c(rep("surv", 3*N_hosp), rep("stay", 3*N_hosp)))
+
+hseq <- seq(min(psi_surv), max(psi_stay), 0.01)
+hseq_len <- length(hseq)
+
+hdf_smoothed <- data.frame(psi = rep(hseq, 6), 
+                           value = c(predict.mspline(bersmooth_surv, hseq), predict.mspline(bksmooth_surv, hseq), predict.mspline(cgrsmooth_surv, hseq),
+                                   -predict.mspline(bersmooth_stay, hseq), -predict.mspline(bksmooth_stay, hseq), -predict.mspline(cgrsmooth_stay, hseq)),
+                           type = c(rep(c(rep("Binary", hseq_len), rep("BK", hseq_len), rep("CGR", hseq_len)), 2)),
+                           outcome = c(rep("surv", 3*hseq_len), rep("stay", 3*hseq_len)))
+```
+
+Plot it
+```{r}
+library(latex2exp)
+hplot_surv <- ggplot() + theme_bw() + geom_point(data = subset(hdf_discrete, outcome == "surv"), mapping = aes(x = psi, y = value, col = type), size = 2) + scale_color_brewer(palette = "Dark2" ) + geom_line(data = subset(hdf_smoothed, outcome == "surv"), mapping = aes(x = psi, y = value, col = type), linewidth = 1.2) + labs(title = "Survival", col = "CUSUM chart") + xlab(TeX(r'(Estimated arrival rate $\hat{\psi}$ (per day))')) + ylab("Estimated control limit h") + theme(plot.title = element_text(hjust = 0.5, size = 14, face = "bold"), plot.subtitle = element_text(hjust = 0.5, size = 12, color = "grey50"))+scale_x_continuous(breaks = seq(0.1, 0.7, 0.1))
+
+hplot_stay <- ggplot() + theme_bw() + geom_point(data = subset(hdf_discrete, outcome == "stay"), mapping = aes(x = psi, y = value, col = type), size = 2) + scale_color_brewer(palette = "Dark2" ) + geom_line(data = subset(hdf_smoothed, outcome == "stay"), mapping = aes(x = psi, y = value, col = type), linewidth = 1.2) + labs(title = "Duration of stay", col = "CUSUM chart") + xlab(TeX(r'(Estimated arrival rate $\hat{\psi}$ (per day))')) + ylab("Estimated control limit h") + theme(plot.title = element_text(hjust = 0.5, size = 14, face = "bold"), plot.subtitle = element_text(hjust = 0.5, size = 12, color = "grey50")) +scale_x_continuous(breaks = seq(0.1, 0.7, 0.1))
+
+hplots <- ggarrange(hplot_surv, hplot_stay, ncol = 2, labels = c("A", "B"), common.legend = TRUE, legend = "bottom")
+
+
+title_h <- TeX(r'(Smoothed control limits ($\alpha \leq 0.5$))')
+
+hplots_title <- annotate_figure(hplots, top = text_grob(title_h, 
+               color = "black", face = "bold", size = 14))
+#ggsave("SmoothedControlLims.pdf", plot = hplots_title, width = 1200, height = 500, units = "mm", dpi = 300, scale = 0.25)
+```
+
+
+Determine smoothed control limits to use:
+
+```{r}
+h_surv_smoothed <- t(sapply(psi_surv, function(x) c(predict.mspline(bersmooth_surv, x), predict.mspline(bksmooth_surv, x), predict.mspline(cgrsmooth_surv, x))))
+colnames(h_surv_smoothed) <- c("Ber", "BK", "CGR")
+
+h_stay_smoothed <- -t(sapply(psi_stay, function(x) c(predict.mspline(bersmooth_stay, x), predict.mspline(bksmooth_stay, x), predict.mspline(cgrsmooth_stay, x))))
+colnames(h_stay_smoothed) <- c("Ber", "BK", "CGR")
+```
+
+
+# Determine detection times
+
+## Survival time
+
+```{r}
+hosp_names <- as.numeric(names(psi_surv))
+
+surv_det_times <- matrix(Inf, nrow = length(hosp_names), ncol = 5)
+for(i in 1:length(hosp_names)){
+  surv_det_times[i, 2] <- runlength(charts_surv[[i]]$ber, h = h_surv_smoothed[i, 1])
+  surv_det_times[i, 3] <- runlength(charts_surv[[i]]$bk, h = h_surv_smoothed[i, 2])
+  surv_det_times[i, 4] <- runlength(charts_surv[[i]]$cgr, h = h_surv_smoothed[i, 3])
+}
+
+#which hospitals did funnel plot detect
+funnel_det_surv <- as.numeric(funnel_surv$data$unit[which(funnel_surv$data$`0.95` == "worse")])
+#Funnel always detects at end of study
+surv_det_times[match(funnel_det_surv, as.numeric(names(psi_surv))), 1] <- 1095
+#Which rows were detected?
+detected_rows_surv <- which(!apply(1-surv_det_times, 1, function(x) all(is.infinite(x))))
+#Add estimated arrival rate
+surv_det_times[,5] <- round(psi_surv, 2)
+#Add row and column names
+rownames(surv_det_times) <- hosp_names
+colnames(surv_det_times) <- c("funnel", "Ber", "BK", "CGR", "psi")
+
+#Remove rows with no detections.
+surv_det_times <- surv_det_times[detected_rows_surv,]
+surv_detected <- as.numeric(rownames(surv_det_times))
+```
+
+
+```{r}
+library(formattable)
+format_surv <- as.data.frame(surv_det_times)
+colnames(format_surv)[5] <- "Arrival rate"
+formattable(format_surv, list(Binary = formatter(.tag = "span", 
+    style = x ~ style(color = ifelse(!is.infinite(x), "green", "red"))),
+    BK = formatter("span",
+    style = x ~ style(color = ifelse(!is.infinite(x), "green", "red"))),
+    CGR = formatter("span",
+    style = x ~ style(color = ifelse(!is.infinite(x), "green", "red"))),
+    funnel = formatter("span",
+    style = x ~ style(color = ifelse(!is.infinite(x), "green", "red"))),
+    area(col = c('Arrival rate')) ~ normalize_bar("pink", 0.2)
+    ))
+```
+
+
+## Duration of stay
+
+```{r}
+#Hospital names ordered from smallest to largest
+hosp_names <- as.numeric(names(psi_stay))
+
+stay_det_times <- matrix(Inf, nrow = length(hosp_names), ncol = 5)
+for(i in 1:length(hosp_names)){
+  stay_det_times[i, 2] <- runlength(charts_stay[[i]]$ber, h = h_stay_smoothed[i, 1])
+  stay_det_times[i, 3] <- runlength(charts_stay[[i]]$bk, h = h_stay_smoothed[i, 2])
+  stay_det_times[i, 4] <- runlength(charts_stay[[i]]$cgr, h = h_stay_smoothed[i, 3])
+}
+
+#which hospitals did funnel plot detect
+funnel_det_stay <- as.numeric(funnel_stay$data$unit[which(funnel_stay$data$`0.95` == "better")])
+stay_det_times[match(funnel_det_stay, as.numeric(names(psi_stay))), 1] <- 1095
+#Which rows were detected?
+detected_rows <- which(!apply(1-stay_det_times, 1, function(x) all(is.infinite(x))))
+#Add estimated arrival rate
+stay_det_times[,5] <- round(psi_stay, 2)
+#Add row and column names
+rownames(stay_det_times) <- hosp_names
+colnames(stay_det_times) <- c("funnel", "Ber", "BK", "CGR", "psi")
+
+
+
+#Remove rows with no detections.
+stay_det_times <- stay_det_times[detected_rows,]
+stay_detected <- as.numeric(rownames(stay_det_times))
+```
+
+
+```{r}
+library(formattable)
+format_stay <- as.data.frame(stay_det_times)
+colnames(format_stay)[5] <- "Arrival rate"
+formattable(format_stay, list(Ber = formatter("span",
+    style = x ~ style(color = ifelse(!is.infinite(x), "green", "red"))),
+    BK = formatter("span",
+    style = x ~ style(color = ifelse(!is.infinite(x), "green", "red"))),
+    CGR = formatter("span",
+    style = x ~ style(color = ifelse(!is.infinite(x), "green", "red"))),
+    funnel = formatter("span",
+    style = x ~ style(color = ifelse(!is.infinite(x), "green", "red"))),
+    area(col = c('Arrival rate')) ~ normalize_bar("pink", 0.2)
+    ))
+```
+
+
+## Venn Diagram of detections
+
+
+
+```{r}
+library(ggvenn)
+library(RColorBrewer)
+venn_surv <- list(" " = funnel_det_surv, 
+                  "  " = as.numeric(rownames(surv_det_times)[which(!is.infinite(surv_det_times[, 2]))]),
+                  "   " = as.numeric(rownames(surv_det_times)[which(!is.infinite(surv_det_times[, 3]))]), 
+                  "    " = as.numeric(rownames(surv_det_times)[which(!is.infinite(surv_det_times[, 4]))]))
+
+venn_stay <- list(" " = funnel_det_stay, 
+                  "  " = as.numeric(rownames(stay_det_times)[which(!is.infinite(stay_det_times[, 2]))]),
+                  "   " = as.numeric(rownames(stay_det_times)[which(!is.infinite(stay_det_times[, 3]))]), 
+                  "    " = as.numeric(rownames(stay_det_times)[which(!is.infinite(stay_det_times[, 4]))]))
+
+cols_venn <- RColorBrewer::brewer.pal(4, name = "Dark2")[c(4, 1, 2, 3)]
+ggven_surv <- ggvenn(venn_surv, fill_color = cols_venn, text_size = 5, set_name_size = 5) + annotate("text", x = -1.6, y = -1.2, label = "funnel plot", col = cols_venn[1], size = 6) + annotate("text", x = -1, y = 1.2, label = "Binary CUSUM", col = cols_venn[2], size = 6) + annotate("text", x = 1, y = 1.2, label = "BK-CUSUM", col = cols_venn[3], size = 6) + annotate("text", x = 1.6, y = -1.2, label = "CGR-CUSUM", col = cols_venn[4], size = 6)
+ggven_stay <- ggvenn(venn_stay, fill_color = cols_venn, text_size = 5, set_name_size = 5) + annotate("text", x = -1.6, y = -1.2, label = "funnel plot", col = cols_venn[1], size = 6) + annotate("text", x = -1, y = 1.2, label = "Binary CUSUM", col = cols_venn[2], size = 6) + annotate("text", x = 1, y = 1.2, label = "BK-CUSUM", col = cols_venn[3], size = 6) + annotate("text", x = 1.6, y = -1.2, label = "CGR-CUSUM", col = cols_venn[4], size = 6)
+
+ggven_surv_annot <- annotate_figure(ggven_surv, top = text_grob("Survival", 
+               color = "black", face = "bold", size = 16))
+ggven_stay_annot <- annotate_figure(ggven_stay, top = text_grob("Duration of stay", 
+               color = "black", face = "bold", size = 16))
+
+venndiags <- ggarrange(ggven_surv_annot, ggven_stay_annot, ncol = 2, labels = c("A", "B"))
+
+venndiags_annot <- annotate_figure(venndiags, top = text_grob("Venn diagrams", 
+               color = "black", face = "bold", size = 18))
+
+#ggsave("VennDiagrams.pdf", plot = venndiags_annot, width = 1200, height = 500, units = "mm", dpi = 300, scale = 0.28)
+```
+
+
+# Interactive charts
+
+Ticks on the graph to transform to date format:
+
+```{r}
+#1 January 2019 is on day 2922
+
+#Calculate duration between 1st of every month
+days_between <- c(0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+                  31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+                  31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30)
+months <- c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec") 
+years <- rep(c("19", "20","21"))
+ticklabels = apply(expand.grid(months, years), 1, paste, collapse="")
+
+xaxis_dates = list(showgrid = TRUE, tickmode = "array", tickvals = 2922 + cumsum(days_between), ticktext = ticklabels)
+
+```
+Make an interactive plot from the detected 
+
+
+```{r}
+for(i in 1:length(hosp_names)){
+  charts_surv[[i]]$ber$h <- h_surv_smoothed[i,1]
+  charts_surv[[i]]$bk$h <- h_surv_smoothed[i,2]
+  charts_surv[[i]]$cgr$h <- h_surv_smoothed[i,3]
+}
+
+surv_ilist <- vector(mode = "list", length = length(detected_rows_surv)*3)
+
+for(i in 1:length(surv_ilist)){
+  surv_ilist[[3*(i-1) + 1]] <- charts_surv[[detected_rows_surv[i]]]$ber
+  surv_ilist[[3*(i-1) + 2]] <- charts_surv[[detected_rows_surv[i]]]$bk
+  surv_ilist[[3*(i-1) + 3]] <- charts_surv[[detected_rows_surv[i]]]$cgr
+}
+
+iplot_unit_surv <- interactive_plot(surv_ilist, unit_names = as.character(rep(surv_detected, each = 3)),
+                        scale = TRUE, group_by = "unit")
+iplot_type_surv <- interactive_plot(surv_ilist, unit_names = as.character(rep(surv_detected, each = 3)),
+                        scale = TRUE, group_by = "type")
+
+iplot_unit_surv_month <- layout(iplot_unit_surv, xaxis = xaxis_dates, yaxis = list(showgrid = FALSE))
+iplot_type_surv_month <- layout(iplot_type_surv, xaxis = xaxis_dates, yaxis = list(showgrid = FALSE))
+```
+
+```{r eval = FALSE}
+library(plotly)
+htmlwidgets::saveWidget(as_widget(iplot_unit_surv_month), "iplot_surv_unit_all.html")
+htmlwidgets::saveWidget(as_widget(iplot_type_surv_month), "iplot_surv_type_all.html")
+```
+
+
+
+## Duration of stay
+
+```{r}
+for(i in 1:length(hosp_names)){
+  charts_stay[[i]]$ber$h <- h_stay_smoothed[i,1]
+  charts_stay[[i]]$bk$h <- h_stay_smoothed[i,2]
+  charts_stay[[i]]$cgr$h <- h_stay_smoothed[i,3]
+}
+
+stay_ilist <- vector(mode = "list", length = length(detected_rows)*3)
+
+for(i in 1:length(stay_ilist)){
+  stay_ilist[[3*(i-1) + 1]] <- charts_stay[[detected_rows[i]]]$ber
+  stay_ilist[[3*(i-1) + 2]] <- charts_stay[[detected_rows[i]]]$bk
+  stay_ilist[[3*(i-1) + 3]] <- charts_stay[[detected_rows[i]]]$cgr
+}
+
+iplot_unit_stay <- interactive_plot(stay_ilist, unit_names = as.character(rep(stay_detected, each = 3)),
+                        scale = TRUE, group_by = "unit")
+iplot_type_stay <- interactive_plot(stay_ilist, unit_names = as.character(rep(stay_detected, each = 3)),
+                        scale = TRUE, group_by = "type")
+
+
+iplot_unit_stay_month <- layout(iplot_unit_stay, xaxis = xaxis_dates, yaxis = list(showgrid = FALSE))
+iplot_type_stay_month <- layout(iplot_type_stay, xaxis = xaxis_dates, yaxis = list(showgrid = FALSE))
+```
+
+
+```{r eval = FALSE}
+library(plotly)
+htmlwidgets::saveWidget(as_widget(iplot_unit_stay_month), "iplot_stay_unit_all.html")
+htmlwidgets::saveWidget(as_widget(iplot_type_stay_month), "iplot_stay_type_all.html")
+```
+
+
+# Hospital plots
+
+Plot all function to make hospital plots
+
+```{r}
+plot.ALL <- function(chartlist, nameslist, linet = rep("longdash", length(chartlist)), hlist = NULL, scaled = FALSE){
+  library(RColorBrewer)
+  #This function plots together all the elements in the list with different colours.
+  n <- length(chartlist)
+  #library(RColorBrewer)
+  #brewer.pal(7, "BrBG")
+  #cols <- palette.colors(n = n, palette = "ggplot")
+  cols <- brewer.pal(n = n, name = "Dark2")
+  lty <- c("dotdash", "solid", "longdash")
+  finaldat <- data.frame(t = integer(), value = double(), description = factor())
+  for (k in 1:n){
+    if(inherits(chartlist[[k]], "bercusum")){
+      pltGLR <- cbind(as.data.frame(chartlist[[k]]$CUSUM[, c(1,2)]), as.factor(nameslist[k]))
+      if(isTRUE(scaled)){
+        pltGLR[,2] <- pltGLR[,2]/hlist[k]
+      }
+      names(pltGLR) <- c("t", "value", "description")
+      finaldat <- rbind(finaldat, pltGLR)
+    } else if(inherits(chartlist[[k]], "cgrcusum")){
+      pltGLR <- cbind(as.data.frame(chartlist[[k]]$CGR[, c(1,2)]), as.factor(nameslist[k]))
+      if(isTRUE(scaled)){
+        pltGLR[,2] <- pltGLR[,2]/hlist[k]
+      }
+      names(pltGLR) <- c("t", "value", "description")
+      finaldat <- rbind(finaldat, pltGLR)
+    } else if(inherits(chartlist[[k]], "bkcusum")){
+      pltBK <- cbind(as.data.frame(chartlist[[k]]$BK), as.factor(nameslist[k]))
+      if(isTRUE(scaled)){
+        pltBK[,2] <- pltBK[,2]/hlist[k]
+      }
+      names(pltBK) <- c("t", "value", "description")
+      finaldat <- rbind(finaldat, pltBK)
+    }
+  }
+  names(cols) = unique(finaldat$description)
+  names(lty) = unique(finaldat$description)
+  colScale <- scale_colour_manual(name = "Chart", values = cols)
+  ltyScale <- scale_linetype_manual(name = "Chart", values = lty)
+  names(finaldat) <- c("t", "value", "description")
+  g <- ggplot(data = finaldat, mapping= aes(x = t, y = value, colour = description, linetype = description)) + geom_line(size = 1.2) + colScale + ltyScale
+  if(!is.null(hlist)){
+    if(isTRUE(scaled)){
+        g <- g+ geom_hline(yintercept = 1, colour = "black", linetype = "solid", linewidth = 1.2)
+    } else{
+        for(j in 1:length(hlist)){
+          g <- g+ geom_hline(yintercept = hlist[j], colour = cols[j], linetype = linet[j], linewidth = 1.2) 
+        }
+      }
+  }
+  return(g)
+}
+```
+
+
+## Patient Survival
+
+```{r}
+survhosp_1 <- plot.ALL(list(charts_surv[[47]]$ber, charts_surv[[47]]$bk, charts_surv[[47]]$cgr), nameslist = c("Binary", "BK", "CGR"), hlist = h_surv_smoothed[47, ], scaled = TRUE) + labs(title = "Hospital 47 control charts", subtitle = "Detected only by funnel plot") + theme(plot.title = element_text(size = 15, hjust = 0.5), plot.subtitle = element_text(size = 13,hjust = 0.5, color = "grey50")) +  #Title/Subtite settings
+  xlab("Date") + ylab("Value") + theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(hjust=1), axis.title.y = element_text(size = 16), text = element_text(size=16)) +   #X/Y lab settings
+  theme(legend.position = c(0.2, 0.75), legend.text = element_text(size = 11), legend.key.size = unit(0.8, "cm")) + guides(linetype = guide_legend(override.aes = list(size = 1))) +   #Legend settings
+  scale_x_continuous(breaks = xaxis_dates$tickvals[c(TRUE, FALSE)], limits = c(2922, 3987+31), labels = xaxis_dates$ticktext[c(TRUE, FALSE)]) + theme(axis.text.x = element_text(angle = 50)) +  #Scale X Axis
+  scale_y_continuous(breaks = seq(0, 1.1, 0.2))
+  
+  
+survhosp_2 <- plot.ALL(list(charts_surv[[33]]$ber, charts_surv[[33]]$bk, charts_surv[[33]]$cgr), nameslist = c("Binary", "BK", "CGR"), hlist = h_surv_smoothed[33, ], scaled = TRUE) + labs(title = "Hospital 33 control charts", subtitle = "Detected by all methods") + theme(plot.title = element_text(size = 15, hjust = 0.5), plot.subtitle = element_text(size = 13,hjust = 0.5, color = "grey50")) +  #Title/Subtite settings
+  xlab("Date") + ylab("Value") + theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(hjust=1), axis.title.y = element_text(size = 16), text = element_text(size=16)) +   #X/Y lab settings
+  theme(legend.position = c(0.2, 0.75), legend.text = element_text(size = 11), legend.key.size = unit(0.8, "cm")) + guides(linetype = guide_legend(override.aes = list(size = 1))) +   #Legend settings
+  scale_x_continuous(breaks = xaxis_dates$tickvals[c(TRUE, FALSE)], limits = c(2922, 3987+31), labels = xaxis_dates$ticktext[c(TRUE, FALSE)]) + theme(axis.text.x = element_text(angle = 50)) #+  #Scale X Axis
+  #scale_y_continuous(breaks = seq(0, 1.1, 0.2))
+
+survhosp_3 <- plot.ALL(list(charts_surv[[53]]$ber, charts_surv[[53]]$bk, charts_surv[[53]]$cgr), nameslist = c("Binary", "BK", "CGR"), hlist = h_surv_smoothed[53, ], scaled = TRUE) + labs(title = "Hospital 53 control charts", subtitle = "Detected only by CGR-CUSUM") + theme(plot.title = element_text(size = 15, hjust = 0.5), plot.subtitle = element_text(size = 13,hjust = 0.5, color = "grey50")) +  #Title/Subtite settings
+  xlab("Date") + ylab("Value") + theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(hjust=1), axis.title.y = element_text(size = 16), text = element_text(size=16)) +   #X/Y lab settings
+  theme(legend.position = c(0.8, 0.75), legend.text = element_text(size = 11), legend.key.size = unit(0.8, "cm")) + guides(linetype = guide_legend(override.aes = list(size = 1))) +   #Legend settings
+  scale_x_continuous(breaks = xaxis_dates$tickvals[c(TRUE, FALSE)], limits = c(2922, 3987+31), labels = xaxis_dates$ticktext[c(TRUE, FALSE)]) + theme(axis.text.x = element_text(angle = 50)) #+  #Scale X Axis
+  #scale_y_continuous(breaks = seq(0, 1.1, 0.2))
+
+
+survhosp_4 <- plot.ALL(list(charts_surv[[31]]$ber, charts_surv[[31]]$bk, charts_surv[[31]]$cgr), nameslist = c("Binary", "BK", "CGR"), hlist = h_surv_smoothed[31, ], scaled = TRUE) + labs(title = "Hospital 31 control charts", subtitle = "Detected only by binary and BK-CUSUM") + theme(plot.title = element_text(size = 15, hjust = 0.5), plot.subtitle = element_text(size = 13,hjust = 0.5, color = "grey50")) +  #Title/Subtite settings
+  xlab("Date") + ylab("Value") + theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(hjust=1), axis.title.y = element_text(size = 16), text = element_text(size=16)) +   #X/Y lab settings
+  theme(legend.position = c(0.2, 0.75), legend.text = element_text(size = 11), legend.key.size = unit(0.8, "cm")) + guides(linetype = guide_legend(override.aes = list(size = 1))) +   #Legend settings
+  scale_x_continuous(breaks = xaxis_dates$tickvals[c(TRUE, FALSE)], limits = c(2922, 3987+31), labels = xaxis_dates$ticktext[c(TRUE, FALSE)]) + theme(axis.text.x = element_text(angle = 50)) #+  #Scale X Axis
+  #scale_y_continuous(breaks = seq(0, 1.1, 0.2))
+
+  
+```
+
+
+```{r}
+a <- ggarrange(survhosp_1, survhosp_2, survhosp_3, survhosp_4, common.legend = TRUE, legend = "bottom", ncol = 2, nrow = 2, labels = c("A", "B", "C", "D"))
+ggsave("survival_charts_4hosp.pdf", plot = a, width = 170, height = 120, units = "mm", dpi = 300, scale = 2)
+```
+
+
+## Duration of Stay
+
+```{r}
+plot.ALLlower <- function(chartlist, nameslist, linet = rep("longdash", length(chartlist)), hlist = NULL, scaled = FALSE){
+  library(RColorBrewer)
+  #This function plots together all the elements in the list with different colours.
+  n <- length(chartlist)
+  #library(RColorBrewer)
+  #brewer.pal(7, "BrBG")
+  #cols <- palette.colors(n = n, palette = "ggplot")
+  cols <- brewer.pal(n = n, name = "Dark2")
+  lty <- c("dotdash", "solid", "longdash")
+  finaldat <- data.frame(t = integer(), value = double(), description = factor())
+  for (k in 1:n){
+    if(inherits(chartlist[[k]], "bercusum")){
+      pltGLR <- cbind(as.data.frame(chartlist[[k]]$CUSUM[, c(1,2)]), as.factor(nameslist[k]))
+      if(isTRUE(scaled)){
+        pltGLR[,2] <- -pltGLR[,2]/hlist[k]
+      }
+      names(pltGLR) <- c("t", "value", "description")
+      finaldat <- rbind(finaldat, pltGLR)
+    } else if(inherits(chartlist[[k]], "cgrcusum")){
+      pltGLR <- cbind(as.data.frame(chartlist[[k]]$CGR[, c(1,2)]), as.factor(nameslist[k]))
+      if(isTRUE(scaled)){
+        pltGLR[,2] <- -pltGLR[,2]/hlist[k]
+      }
+      names(pltGLR) <- c("t", "value", "description")
+      finaldat <- rbind(finaldat, pltGLR)
+    } else if(inherits(chartlist[[k]], "bkcusum")){
+      pltBK <- cbind(as.data.frame(chartlist[[k]]$BK), as.factor(nameslist[k]))
+      if(isTRUE(scaled)){
+        pltBK[,2] <- -pltBK[,2]/hlist[k]
+      }
+      names(pltBK) <- c("t", "value", "description")
+      finaldat <- rbind(finaldat, pltBK)
+    }
+  }
+  names(cols) = unique(finaldat$description)
+  names(lty) = unique(finaldat$description)
+  colScale <- scale_colour_manual(name = "Chart", values = cols)
+  ltyScale <- scale_linetype_manual(name = "Chart", values = lty)
+  names(finaldat) <- c("t", "value", "description")
+  g <- ggplot(data = finaldat, mapping= aes(x = t, y = value, colour = description, linetype = description)) + geom_line(linewidth = 1.2) + colScale + ltyScale
+  if(!is.null(hlist)){
+    if(isTRUE(scaled)){
+        g <- g+ geom_hline(yintercept = -1, colour = "black", linetype = "solid", linewidth = 1.2)
+    } else{
+        for(j in 1:length(hlist)){
+          g <- g+ geom_hline(yintercept = hlist[j], colour = cols[j], linetype = linet[j], linewidth = 1.2) 
+        }
+      }
+  }
+  return(g)
+}
+```
+
+```{r}
+stayhosp_1 <- plot.ALLlower(list(charts_stay[[70]]$ber, charts_stay[[70]]$bk, charts_stay[[70]]$cgr), nameslist = c("Binary", "BK", "CGR"), hlist = h_stay_smoothed[70, ], scaled = TRUE) + labs(title = "Hospital 70 control charts", subtitle = "Detected only by funnel plot") + theme(plot.title = element_text(size = 15, hjust = 0.5), plot.subtitle = element_text(size = 13,hjust = 0.5, color = "grey50")) +  #Title/Subtite settings
+  xlab("Date") + ylab("Value") + theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(hjust=1), axis.title.y = element_text(size = 16), text = element_text(size=16)) +   #X/Y lab settings
+  theme(legend.position = c(0.2, 0.25), legend.text = element_text(size = 11), legend.key.size = unit(0.8, "cm")) + guides(linetype = guide_legend(override.aes = list(size = 1))) +   #Legend settings
+  scale_x_continuous(breaks = xaxis_dates$tickvals[c(TRUE, FALSE)], limits = c(2922, 3987+31), labels = xaxis_dates$ticktext[c(TRUE, FALSE)]) + theme(axis.text.x = element_text(angle = 50)) +  #Scale X Axis
+  scale_y_continuous(breaks = seq(0, -1.1, -0.2))
+
+
+stayhosp_2 <- plot.ALLlower(list(charts_stay[[14]]$ber, charts_stay[[14]]$bk, charts_stay[[14]]$cgr), nameslist = c("Binary", "BK", "CGR"), hlist = h_stay_smoothed[14, ], scaled = TRUE) + labs(title = "Hospital 14 control charts", subtitle = "Detected by all methods") + theme(plot.title = element_text(size = 15, hjust = 0.5), plot.subtitle = element_text(size = 13,hjust = 0.5, color = "grey50")) +  #Title/Subtite settings
+  xlab("Date") + ylab("Value") + theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(hjust=1), axis.title.y = element_text(size = 16), text = element_text(size=16)) +   #X/Y lab settings
+  theme(legend.position = c(0.2, 0.25), legend.text = element_text(size = 11), legend.key.size = unit(0.8, "cm")) + guides(linetype = guide_legend(override.aes = list(size = 1))) +   #Legend settings
+  scale_x_continuous(breaks = xaxis_dates$tickvals[c(TRUE, FALSE)], limits = c(2922, 3987+31), labels = xaxis_dates$ticktext[c(TRUE, FALSE)]) + theme(axis.text.x = element_text(angle = 50)) #+  #Scale X Axis
+  #scale_y_continuous(breaks = seq(0, -1.1, -0.2))
+
+stayhosp_3 <- plot.ALLlower(list(charts_stay[[33]]$ber, charts_stay[[33]]$bk, charts_stay[[33]]$cgr), nameslist = c("Binary", "BK", "CGR"), hlist = h_stay_smoothed[33, ], scaled = TRUE) + labs(title = "Hospital 33 control charts", subtitle = "Detected only by CGR-CUSUM") + theme(plot.title = element_text(size = 15, hjust = 0.5), plot.subtitle = element_text(size = 13,hjust = 0.5, color = "grey50")) +  #Title/Subtite settings
+  xlab("Date") + ylab("Value") + theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(hjust=1), axis.title.y = element_text(size = 16), text = element_text(size=16)) +   #X/Y lab settings
+  theme(legend.position = c(0.2, 0.25), legend.text = element_text(size = 11), legend.key.size = unit(0.8, "cm")) + guides(linetype = guide_legend(override.aes = list(size = 1))) +   #Legend settings
+  scale_x_continuous(breaks = xaxis_dates$tickvals[c(TRUE, FALSE)], limits = c(2922, 3987+31), labels = xaxis_dates$ticktext[c(TRUE, FALSE)]) + theme(axis.text.x = element_text(angle = 50)) #+  #Scale X Axis
+  #scale_y_continuous(breaks = seq(0, -1.1, -0.2))
+
+stayhosp_4 <- plot.ALLlower(list(charts_stay[[64]]$ber, charts_stay[[64]]$bk, charts_stay[[64]]$cgr), nameslist = c("Binary", "BK", "CGR"), hlist = h_stay_smoothed[64, ], scaled = TRUE) + labs(title = "Hospital 64 control charts", subtitle = "Detected by all methods") + theme(plot.title = element_text(size = 15, hjust = 0.5), plot.subtitle = element_text(size = 13,hjust = 0.5, color = "grey50")) +  #Title/Subtite settings
+  xlab("Date") + ylab("Value") + theme(axis.title.x = element_text(size = 16), axis.text.x = element_text(hjust=1), axis.title.y = element_text(size = 16), text = element_text(size=16)) +   #X/Y lab settings
+  theme(legend.position = c(0.2, 0.25), legend.text = element_text(size = 11), legend.key.size = unit(0.8, "cm")) + guides(linetype = guide_legend(override.aes = list(size = 1))) +   #Legend settings
+  scale_x_continuous(breaks = xaxis_dates$tickvals[c(TRUE, FALSE)], limits = c(2922, 3987+31), labels = xaxis_dates$ticktext[c(TRUE, FALSE)]) + theme(axis.text.x = element_text(angle = 50)) #+  #Scale X Axis
+  #scale_y_continuous(breaks = seq(0, -1.1, -0.2))
+
+```
+
+
+```{r}
+b <- ggarrange(stayhosp_1, stayhosp_2, stayhosp_3, stayhosp_4, common.legend = TRUE, legend = "bottom", ncol = 2, nrow = 2, labels = c("A", "B", "C", "D"))
+ggsave("stay_charts_4hosp.pdf", plot = b, width = 170, height = 120, units = "mm", dpi = 300, scale = 2)
+```
+
+
+# Additional File generation
+
+```{r}
+library(formattable)
+```
+
+```{r}
+hosp_names <- as.numeric(names(psi_surv))
+
+surv_det_times <- matrix(Inf, nrow = length(hosp_names), ncol = 5)
+for(i in 1:length(hosp_names)){
+  surv_det_times[i, 2] <- runlength(charts_surv[[i]]$ber, h = h_surv_smoothed[i, 1])
+  surv_det_times[i, 3] <- runlength(charts_surv[[i]]$bk, h = h_surv_smoothed[i, 2])
+  surv_det_times[i, 4] <- runlength(charts_surv[[i]]$cgr, h = h_surv_smoothed[i, 3])
+}
+
+#which hospitals did funnel plot detect
+funnel_det_surv <- as.numeric(funnel_surv$data$unit[which(funnel_surv$data$`0.95` == "worse")])
+#Funnel always detects at end of study
+surv_det_times[match(funnel_det_surv, as.numeric(names(psi_surv))), 1] <- 1095
+#Which rows were detected?
+detected_rows_surv <- which(!apply(1-surv_det_times, 1, function(x) all(is.infinite(x))))
+#Add estimated arrival rate
+surv_det_times[,5] <- round(psi_surv, 2)
+#Add row and column names
+surv_det_times2 <- cbind(1:71, surv_det_times, round(h_surv_smoothed, 2))
+colnames(surv_det_times2) <- c("Hospital number" ,"funnel", "Binary", "BK", "CGR", "Estimated Arrival rate", "h_binary", "h_BK", "h_CGR")
+surv_det_times2 <- surv_det_times2[, c(1, 6, 2, 3, 4, 5, 7, 8, 9)]
+
+format_surv2 <- as.data.frame(surv_det_times2)
+formattable(format_surv2, 
+    align = c("l", "l", "c", "c", "c", "c", "c", "c", "c"),
+    list(
+    Binary = formatter("span", style = x ~ style(color = ifelse(!is.infinite(x), "green", "red"))),
+    BK = formatter("span", style = x ~ style(color = ifelse(!is.infinite(x), "green", "red"))),
+    CGR = formatter("span", style = x ~ style(color = ifelse(!is.infinite(x), "green", "red"))),
+    funnel = formatter("span", style = x ~ style(color = ifelse(!is.infinite(x), "green", "red"))),
+    area(col = c('Estimated Arrival rate')) ~ normalize_bar("pink", 0.2),
+    h_binary = color_tile("lightgreen", "seagreen"),
+    h_BK = color_tile("white", "grey50"),
+    h_CGR = color_tile("lightblue", "steelblue")
+    ))
+```
+
+
+
+
+```{r}
+#Hospital names ordered from smallest to largest
+hosp_names <- as.numeric(names(psi_stay))
+
+stay_det_times <- matrix(Inf, nrow = length(hosp_names), ncol = 5)
+for(i in 1:length(hosp_names)){
+  stay_det_times[i, 2] <- runlength(charts_stay[[i]]$ber, h = h_stay_smoothed[i, 1])
+  stay_det_times[i, 3] <- runlength(charts_stay[[i]]$bk, h = h_stay_smoothed[i, 2])
+  stay_det_times[i, 4] <- runlength(charts_stay[[i]]$cgr, h = h_stay_smoothed[i, 3])
+}
+
+#which hospitals did funnel plot detect
+funnel_det_stay <- as.numeric(funnel_stay$data$unit[which(funnel_stay$data$`0.95` == "better")])
+stay_det_times[match(funnel_det_stay, as.numeric(names(psi_stay))), 1] <- 1095
+#Which rows were detected?
+detected_rows <- which(!apply(1-stay_det_times, 1, function(x) all(is.infinite(x))))
+#Add estimated arrival rate
+stay_det_times[,5] <- round(psi_stay, 2)
+#Add row and column names
+rownames(stay_det_times) <- hosp_names
+colnames(stay_det_times) <- c("funnel", "Ber", "BK", "CGR", "psi")
+``` 
+
+
+
+
+
+
+
