@@ -1,2 +1,7 @@
 # DCRA_CUSUM
-Code used to calculate and visualise CUSUM charts for the DCRA.
+
+Implementation code for CUSUMs on the DCRA data set.
+
+
+This repository aims to make the results from [Inspecting the quality of care: a comparison of CUSUM methods for inter hospital performance](www.google.com) reproducible. 
+There is a single subdirectory `R_code`, containing all the code used along with some documentation.
