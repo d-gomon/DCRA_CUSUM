@@ -6,7 +6,7 @@ Code used to analyze the [DCRA](https://dica.nl/dcra/home) data set.
 
 - **Step 1. Data preparation** 
 
-Removing patients from the analysis, converting to the correct format. This process is described in the file `1_LoadingData.R`.
+Removing patients from the analysis, converting to the correct format. The file describing this process is not publicly available.
 
 - **Step 2. Calculating control limits for the CUSUM charts**
 
